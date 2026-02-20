@@ -4,6 +4,7 @@ import {
   HomeIcon,
   ChartBarIcon,
   BuildingStorefrontIcon,
+  ArrowUpTrayIcon,
   ArrowRightOnRectangleIcon,
   ChevronLeftIcon,
 } from '@heroicons/react/24/outline'
@@ -12,6 +13,7 @@ const navItems = [
   { path: '/', label: 'Dashboard', icon: HomeIcon, end: true },
   { path: '/velocity', label: 'Velocity', icon: ChartBarIcon },
   { path: '/stores', label: 'Stores', icon: BuildingStorefrontIcon },
+  { path: '/import', label: 'Import Data', icon: ArrowUpTrayIcon },
 ]
 
 export default function Sidebar() {

@@ -3,12 +3,14 @@ import {
   HomeIcon,
   ChartBarIcon,
   BuildingStorefrontIcon,
+  ArrowUpTrayIcon,
 } from '@heroicons/react/24/outline'
 
 const navItems = [
   { path: '/', label: 'Home', icon: HomeIcon, end: true },
   { path: '/velocity', label: 'Velocity', icon: ChartBarIcon },
   { path: '/stores', label: 'Stores', icon: BuildingStorefrontIcon },
+  { path: '/import', label: 'Import', icon: ArrowUpTrayIcon },
 ]
 
 export default function MobileNav() {
