@@ -1,0 +1,286 @@
+name: Weekly Slice Ingest
+
+on:
+  schedule:
+    # 10:00 AM CT (Central Time) = 15:00 UTC on Mondays
+    - cron: '0 15 * * 1'
+  workflow_dispatch: {}
+
+env:
+  SLICE_INGEST_URL: ${{ secrets.SLICE_INGEST_URL }}
+  INGEST_API_SECRET: ${{ secrets.INGEST_API_SECRET }}
+  RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+  GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install workflow dependencies
+        run: npm install googleapis resend
+
+      - name: Find latest file in Google Drive
+        id: find-file
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { google } = require('googleapis');
+
+            // Parse service account credentials from secret
+            const credentials = JSON.parse(process.env.GOOGLE_DRIVE_CREDENTIALS);
+            const auth = new google.auth.GoogleAuth({
+              credentials,
+              scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+            });
+
+            const drive = google.drive({ version: 'v3', auth });
+
+            // Find .xlsx files modified in the last 48 hours (buffer for timezone)
+            const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+            const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+            const res = await drive.files.list({
+              q: `'${folderId}' in parents and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and modifiedTime > '${cutoff}' and trashed = false`,
+              fields: 'files(id, name, modifiedTime)',
+              orderBy: 'modifiedTime desc',
+              pageSize: 1,
+            });
+
+            const files = res.data.files || [];
+
+            if (files.length === 0) {
+              core.setOutput('found', 'false');
+              core.setOutput('filename', '');
+              core.setOutput('fileId', '');
+              return;
+            }
+
+            const file = files[0];
+            core.setOutput('found', 'true');
+            core.setOutput('filename', file.name);
+            core.setOutput('fileId', file.id);
+            console.log(`Found file: ${file.name} (modified ${file.modifiedTime})`);
+        env:
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+
+      - name: Send failure email (no file found)
+        if: steps.find-file.outputs.found == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { Resend } = require('resend');
+            const resend = new Resend(process.env.RESEND_API_KEY);
+
+            const today = new Date().toLocaleDateString('en-US', {
+              weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+            });
+
+            await resend.emails.send({
+              from: 'Slice <onboarding@resend.dev>',
+              to: 'brad@cairocpg.com',
+              subject: '⚠️ Slice Weekly Ingest Failed',
+              html: `
+                <h2>No file found in Google Drive</h2>
+                <p>The weekly ingest ran on <strong>${today}</strong> but no .xlsx file
+                was found in the "Slice Weekly Exports" folder that was modified in
+                the last 48 hours.</p>
+                <p><strong>What to do:</strong></p>
+                <ul>
+                  <li>Download the latest QuickSight export from Whole Foods</li>
+                  <li>Drop it into the "Slice Weekly Exports" folder in Google Drive</li>
+                  <li>Re-run the workflow manually from GitHub Actions</li>
+                </ul>
+              `,
+            });
+
+            core.setFailed('No file found in Google Drive — failure email sent.');
+
+      - name: Download file from Google Drive
+        if: steps.find-file.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { google } = require('googleapis');
+            const fs = require('fs');
+
+            const credentials = JSON.parse(process.env.GOOGLE_DRIVE_CREDENTIALS);
+            const auth = new google.auth.GoogleAuth({
+              credentials,
+              scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+            });
+
+            const drive = google.drive({ version: 'v3', auth });
+            const fileId = '${{ steps.find-file.outputs.fileId }}';
+
+            const res = await drive.files.get(
+              { fileId, alt: 'media' },
+              { responseType: 'arraybuffer' }
+            );
+
+            fs.writeFileSync('/tmp/weekly-export.xlsx', Buffer.from(res.data));
+            console.log('Downloaded file to /tmp/weekly-export.xlsx');
+        env:
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+
+      - name: Ingest file into Slice
+        if: steps.find-file.outputs.found == 'true'
+        id: ingest
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer $INGEST_API_SECRET" \
+            -F "file=@/tmp/weekly-export.xlsx;filename=${{ steps.find-file.outputs.filename }}" \
+            "$SLICE_INGEST_URL/api/ingest")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          echo "response=$BODY" >> $GITHUB_OUTPUT
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ingest_error=$BODY" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Extract uploadId for report generation
+          UPLOAD_ID=$(echo "$BODY" | jq -r '.uploadId')
+          echo "upload_id=$UPLOAD_ID" >> $GITHUB_OUTPUT
+
+      - name: Generate report PDF
+        if: steps.ingest.outcome == 'success'
+        id: report
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer $INGEST_API_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"uploadId\": \"${{ steps.ingest.outputs.upload_id }}\"}" \
+            "$SLICE_INGEST_URL/api/report")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "HTTP Status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "report_error=$BODY" >> $GITHUB_OUTPUT
+            echo "report_success=false" >> $GITHUB_OUTPUT
+          else
+            # Extract PDF base64 and save to file
+            echo "$BODY" | jq -r '.pdf' | base64 -d > /tmp/weekly-report.pdf
+            FILENAME=$(echo "$BODY" | jq -r '.filename')
+            echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+            echo "report_success=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send success email
+        if: steps.ingest.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { Resend } = require('resend');
+            const fs = require('fs');
+            const resend = new Resend(process.env.RESEND_API_KEY);
+
+            const ingestResponse = JSON.parse(process.env.INGEST_RESPONSE || '{}');
+            const weekEnd = ingestResponse.weekEnd || 'Unknown';
+            const weekStart = ingestResponse.weekStart || 'Unknown';
+            const rowCount = ingestResponse.rowCount || 0;
+            const items = ingestResponse.items || 0;
+            const regions = ingestResponse.regions || 0;
+            const stores = ingestResponse.stores || 0;
+            const warnings = ingestResponse.warnings || [];
+
+            const reportSuccess = '${{ steps.report.outputs.report_success }}' === 'true';
+
+            const attachments = [];
+            if (reportSuccess && fs.existsSync('/tmp/weekly-report.pdf')) {
+              const pdfContent = fs.readFileSync('/tmp/weekly-report.pdf');
+              attachments.push({
+                filename: '${{ steps.report.outputs.filename }}' || 'weekly-report.pdf',
+                content: pdfContent,
+              });
+            }
+
+            const warningHtml = warnings.length > 0
+              ? `<h3>Parser Warnings</h3><ul>${warnings.map(w => `<li>${w}</li>`).join('')}</ul>`
+              : '';
+
+            const reportNote = reportSuccess
+              ? '<p>📎 The brand report PDF is attached.</p>'
+              : '<p>⚠️ Report PDF could not be generated, but the data was ingested successfully. You can generate the report from the Slice dashboard.</p>';
+
+            await resend.emails.send({
+              from: 'Slice <onboarding@resend.dev>',
+              to: 'brad@cairocpg.com',
+              subject: `Slice Weekly Report — Week Ending ${weekEnd}`,
+              html: `
+                <h2>Weekly Ingest Complete ✅</h2>
+                <p><strong>Week:</strong> ${weekStart} — ${weekEnd}</p>
+                <p><strong>Rows imported:</strong> ${rowCount.toLocaleString()}</p>
+                <p><strong>Items:</strong> ${items} | <strong>Regions:</strong> ${regions} | <strong>Stores:</strong> ${stores}</p>
+                ${warningHtml}
+                ${reportNote}
+                <p><a href="https://slice-zeta.vercel.app/dashboard">Open Slice Dashboard →</a></p>
+              `,
+              attachments,
+            });
+
+            console.log('Success email sent!');
+        env:
+          INGEST_RESPONSE: ${{ steps.ingest.outputs.response }}
+
+      - name: Send failure email (ingest failed)
+        if: failure() && steps.find-file.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { Resend } = require('resend');
+            const resend = new Resend(process.env.RESEND_API_KEY);
+
+            const filename = '${{ steps.find-file.outputs.filename }}';
+            const ingestError = process.env.INGEST_ERROR || 'Unknown error';
+
+            let errorExplanation = '';
+            try {
+              const parsed = JSON.parse(ingestError);
+              errorExplanation = parsed.error || parsed.rawError || ingestError;
+            } catch {
+              errorExplanation = ingestError;
+            }
+
+            await resend.emails.send({
+              from: 'Slice <onboarding@resend.dev>',
+              to: 'brad@cairocpg.com',
+              subject: '⚠️ Slice Weekly Ingest Failed',
+              html: `
+                <h2>Ingest Failed</h2>
+                <p>The file <strong>${filename}</strong> was found in Google Drive but
+                could not be processed.</p>
+                <h3>What went wrong</h3>
+                <p>${errorExplanation}</p>
+                <h3>What to do</h3>
+                <ul>
+                  <li>Check that the file is a standard QuickSight weekly export</li>
+                  <li>Make sure it has "Week Ending" headers in the first row</li>
+                  <li>Try re-downloading from QuickSight and replacing the file</li>
+                  <li>Re-run the workflow from GitHub Actions</li>
+                </ul>
+              `,
+            });
+
+            console.log('Failure email sent.');
+        env:
+          INGEST_ERROR: ${{ steps.ingest.outputs.ingest_error || '' }}
