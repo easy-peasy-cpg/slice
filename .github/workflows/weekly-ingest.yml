@@ -158,7 +158,7 @@ jobs:
           UPLOAD_ID=$(echo "$BODY" | jq -r '.uploadId')
           echo "upload_id=$UPLOAD_ID" >> $GITHUB_OUTPUT
 
-      - name: Generate report PDF
+      - name: Generate report deck
         if: steps.ingest.outcome == 'success'
         id: report
         run: |
@@ -178,8 +178,8 @@ jobs:
             echo "report_error=$BODY" >> $GITHUB_OUTPUT
             echo "report_success=false" >> $GITHUB_OUTPUT
           else
-            # Extract PDF base64 and save to file
-            echo "$BODY" | jq -r '.pdf' | base64 -d > /tmp/weekly-report.pdf
+            # Extract PPTX base64 and save to file
+            echo "$BODY" | jq -r '.pptx' | base64 -d > /tmp/weekly-report.pptx
             FILENAME=$(echo "$BODY" | jq -r '.filename')
             echo "filename=$FILENAME" >> $GITHUB_OUTPUT
             echo "report_success=true" >> $GITHUB_OUTPUT
@@ -206,11 +206,11 @@ jobs:
             const reportSuccess = '${{ steps.report.outputs.report_success }}' === 'true';
 
             const attachments = [];
-            if (reportSuccess && fs.existsSync('/tmp/weekly-report.pdf')) {
-              const pdfContent = fs.readFileSync('/tmp/weekly-report.pdf');
+            if (reportSuccess && fs.existsSync('/tmp/weekly-report.pptx')) {
+              const pptxContent = fs.readFileSync('/tmp/weekly-report.pptx');
               attachments.push({
-                filename: '${{ steps.report.outputs.filename }}' || 'weekly-report.pdf',
-                content: pdfContent,
+                filename: '${{ steps.report.outputs.filename }}' || 'weekly-report.pptx',
+                content: pptxContent,
               });
             }
 
@@ -219,8 +219,8 @@ jobs:
               : '';
 
             const reportNote = reportSuccess
-              ? '<p>📎 The brand report PDF is attached.</p>'
-              : '<p>⚠️ Report PDF could not be generated, but the data was ingested successfully. You can generate the report from the Slice dashboard.</p>';
+              ? '<p>📎 The brand report deck (PPTX) is attached.</p>'
+              : '<p>⚠️ Report deck could not be generated, but the data was ingested successfully. You can generate the report from the Slice dashboard.</p>';
 
             await resend.emails.send({
               from: 'Slice <onboarding@resend.dev>',
@@ -233,7 +233,7 @@ jobs:
                 <p><strong>Items:</strong> ${items} | <strong>Regions:</strong> ${regions} | <strong>Stores:</strong> ${stores}</p>
                 ${warningHtml}
                 ${reportNote}
-                <p><a href="https://slice-zeta.vercel.app/dashboard">Open Slice Dashboard →</a></p>
+                <p><a href="https://slice.cairocpg.com/dashboard">Open Slice Dashboard →</a></p>
               `,
               attachments,
             });
