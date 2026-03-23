@@ -1,4 +1,6 @@
-import PptxGenJS from 'pptxgenjs'
+import { createRequire } from 'module'
+const require = createRequire(import.meta.url)
+const PptxGenJS = require('pptxgenjs')
 
 function formatCompactCurrency(value) {
   if (value == null || isNaN(value)) return '$0'

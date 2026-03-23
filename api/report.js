@@ -2,6 +2,10 @@ import { createClient } from '@supabase/supabase-js'
 import { aggregateDeckData } from './lib/deckHelpers.js'
 import { generateReportPptx } from './lib/reportPptx.js'
 
+export const config = {
+  maxDuration: 60,
+}
+
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end()
